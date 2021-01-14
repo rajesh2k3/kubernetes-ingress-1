@@ -33,6 +33,10 @@ Below we describe the available command-line arguments:
 
 	Enables custom resources. (default true)
 
+.. option:: -enable-preview-policies
+
+	Enables preview policies. (default false)
+
 .. option:: -enable-leader-election
 
 	Enables Leader election to avoid multiple replicas of the controller reporting the status of Ingress, VirtualServer and VirtualServerRoute resources -- only one replica will report status. (default true)
@@ -48,6 +52,12 @@ Below we describe the available command-line arguments:
 .. option:: -external-service <string>
 
 	Specifies the name of the service with the type LoadBalancer through which the Ingress controller pods are exposed externally. The external address of the service is used when reporting the status of Ingress, VirtualServer and VirtualServerRoute resources.
+
+	For Ingress resources only: Requires :option:`-report-ingress-status`.
+
+.. option:: -nginx-cis-connector <string>
+
+	Specifies the name of the NginxCisConnector resource, which exposes the Ingress Controller pods via a BIG-IP system. The IP of the BIG-IP system is used when reporting the status of Ingress, VirtualServer and VirtualServerRoute resources.
 
 	For Ingress resources only: Requires :option:`-report-ingress-status`.
 
@@ -141,8 +151,8 @@ Below we describe the available command-line arguments:
 
 .. option:: -report-ingress-status
 
-	Update the address field in the status of Ingresses resources.
-	Requires the :option:`-external-service` flag or the ``external-status-address`` key in the ConfigMap.
+	Updates the address field in the status of Ingress resources.
+	Requires the :option:`-external-service` or :option:`-nginx-cis-connector` flag, or the ``external-status-address`` key in the ConfigMap.
 
 .. option:: -transportserver-template-path <string>
 

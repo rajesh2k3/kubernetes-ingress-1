@@ -57,7 +57,7 @@ type VirtualServerEx struct {
 	Endpoints           map[string][]string
 	VirtualServerRoutes []*conf_v1.VirtualServerRoute
 	ExternalNameSvcs    map[string]bool
-	Policies            map[string]*conf_v1alpha1.Policy
+	Policies            map[string]*conf_v1.Policy
 	PodsByIP            map[string]PodInfo
 	SecretRefs          map[string]*secrets.SecretReference
 }
@@ -629,7 +629,7 @@ func (v *validationResults) addWarningf(msgFmt string, args ...interface{}) {
 	v.warnings = append(v.warnings, fmt.Sprintf(msgFmt, args...))
 }
 
-func (p *policiesCfg) addAccessControlConfig(accessControl *conf_v1alpha1.AccessControl) *validationResults {
+func (p *policiesCfg) addAccessControlConfig(accessControl *conf_v1.AccessControl) *validationResults {
 	res := newValidationResults()
 	p.Allow = append(p.Allow, accessControl.Allow...)
 	p.Deny = append(p.Deny, accessControl.Deny...)
@@ -642,7 +642,7 @@ func (p *policiesCfg) addAccessControlConfig(accessControl *conf_v1alpha1.Access
 }
 
 func (p *policiesCfg) addRateLimitConfig(
-	rateLimit *conf_v1alpha1.RateLimit,
+	rateLimit *conf_v1.RateLimit,
 	polKey string,
 	polNamespace string,
 	polName string,
@@ -671,7 +671,7 @@ func (p *policiesCfg) addRateLimitConfig(
 }
 
 func (p *policiesCfg) addJWTAuthConfig(
-	jwtAuth *conf_v1alpha1.JWTAuth,
+	jwtAuth *conf_v1.JWTAuth,
 	polKey string,
 	polNamespace string,
 	secretRefs map[string]*secrets.SecretReference,
@@ -684,12 +684,12 @@ func (p *policiesCfg) addJWTAuthConfig(
 
 	jwtSecretKey := fmt.Sprintf("%v/%v", polNamespace, jwtAuth.Secret)
 	secret := secretRefs[jwtSecretKey]
-	if secret.Error != nil {
-		res.addWarningf("JWT policy %q references an invalid Secret: %v", polKey, secret.Error)
+	if secret.Type != "" && secret.Type != secrets.SecretTypeJWK {
+		res.addWarningf("JWT policy %q references a Secret of an incorrect type %q", polKey, secret.Type)
 		res.isError = true
 		return res
-	} else if secret.Type != secrets.SecretTypeJWK {
-		res.addWarningf("JWT policy %q references a Secret of an incorrect type %q", polKey, secret.Type)
+	} else if secret.Error != nil {
+		res.addWarningf("JWT policy %q references an invalid Secret: %v", polKey, secret.Error)
 		res.isError = true
 		return res
 	}
@@ -703,7 +703,7 @@ func (p *policiesCfg) addJWTAuthConfig(
 }
 
 func (p *policiesCfg) addIngressMTLSConfig(
-	ingressMTLS *conf_v1alpha1.IngressMTLS,
+	ingressMTLS *conf_v1.IngressMTLS,
 	polKey string,
 	polNamespace string,
 	context string,
@@ -728,12 +728,12 @@ func (p *policiesCfg) addIngressMTLSConfig(
 
 	secretKey := fmt.Sprintf("%v/%v", polNamespace, ingressMTLS.ClientCertSecret)
 	secret := secretRefs[secretKey]
-	if secret.Error != nil {
-		res.addWarningf("IngressMTLS policy %q references an invalid Secret: %v", polKey, secret.Error)
+	if secret.Type != "" && secret.Type != secrets.SecretTypeCA {
+		res.addWarningf("IngressMTLS policy %q references a Secret of an incorrect type %q", polKey, secret.Type)
 		res.isError = true
 		return res
-	} else if secret.Type != secrets.SecretTypeCA {
-		res.addWarningf("IngressMTLS policy %q references a Secret of an incorrect type %q", polKey, secret.Type)
+	} else if secret.Error != nil {
+		res.addWarningf("IngressMTLS policy %q references an invalid Secret: %v", polKey, secret.Error)
 		res.isError = true
 		return res
 	}
@@ -756,7 +756,7 @@ func (p *policiesCfg) addIngressMTLSConfig(
 }
 
 func (p *policiesCfg) addEgressMTLSConfig(
-	egressMTLS *conf_v1alpha1.EgressMTLS,
+	egressMTLS *conf_v1.EgressMTLS,
 	polKey string,
 	polNamespace string,
 	secretRefs map[string]*secrets.SecretReference,
@@ -776,12 +776,12 @@ func (p *policiesCfg) addEgressMTLSConfig(
 		egressTLSSecret := fmt.Sprintf("%v/%v", polNamespace, egressMTLS.TLSSecret)
 
 		tlsSecret := secretRefs[egressTLSSecret]
-		if tlsSecret.Error != nil {
-			res.addWarningf("EgressMTLS policy %q references an invalid Secret: %v", polKey, tlsSecret.Error)
+		if tlsSecret.Type != "" && tlsSecret.Type != api_v1.SecretTypeTLS {
+			res.addWarningf("EgressMTLS policy %q references a Secret of an incorrect type %q", polKey, tlsSecret.Type)
 			res.isError = true
 			return res
-		} else if tlsSecret.Type != api_v1.SecretTypeTLS {
-			res.addWarningf("EgressMTLS policy %q references a Secret of an incorrect type %q", polKey, tlsSecret.Type)
+		} else if tlsSecret.Error != nil {
+			res.addWarningf("EgressMTLS policy %q references an invalid Secret: %v", polKey, tlsSecret.Error)
 			res.isError = true
 			return res
 		}
@@ -795,12 +795,12 @@ func (p *policiesCfg) addEgressMTLSConfig(
 		trustedCertSecret := fmt.Sprintf("%v/%v", polNamespace, egressMTLS.TrustedCertSecret)
 
 		trustedSecret := secretRefs[trustedCertSecret]
-		if trustedSecret.Error != nil {
-			res.addWarningf("EgressMTLS policy %q references an invalid Secret: %v", polKey, trustedSecret.Error)
+		if trustedSecret.Type != "" && trustedSecret.Type != secrets.SecretTypeCA {
+			res.addWarningf("EgressMTLS policy %q references a Secret of an incorrect type %q", polKey, trustedSecret.Type)
 			res.isError = true
 			return res
-		} else if trustedSecret.Type != secrets.SecretTypeCA {
-			res.addWarningf("EgressMTLS policy %q references a Secret of an incorrect type %q", polKey, trustedSecret.Type)
+		} else if trustedSecret.Error != nil {
+			res.addWarningf("EgressMTLS policy %q references an invalid Secret: %v", polKey, trustedSecret.Error)
 			res.isError = true
 			return res
 		}
@@ -826,7 +826,7 @@ func (p *policiesCfg) addEgressMTLSConfig(
 func (vsc *virtualServerConfigurator) generatePolicies(
 	ownerDetails policyOwnerDetails,
 	policyRefs []conf_v1.PolicyReference,
-	policies map[string]*conf_v1alpha1.Policy,
+	policies map[string]*conf_v1.Policy,
 	context string,
 	policyOpts policyOptions,
 ) policiesCfg {
@@ -887,7 +887,7 @@ func (vsc *virtualServerConfigurator) generatePolicies(
 	return *config
 }
 
-func generateLimitReq(zoneName string, rateLimitPol *conf_v1alpha1.RateLimit) version2.LimitReq {
+func generateLimitReq(zoneName string, rateLimitPol *conf_v1.RateLimit) version2.LimitReq {
 	var limitReq version2.LimitReq
 
 	limitReq.ZoneName = zoneName
@@ -907,7 +907,7 @@ func generateLimitReq(zoneName string, rateLimitPol *conf_v1alpha1.RateLimit) ve
 	return limitReq
 }
 
-func generateLimitReqZone(zoneName string, rateLimitPol *conf_v1alpha1.RateLimit) version2.LimitReqZone {
+func generateLimitReqZone(zoneName string, rateLimitPol *conf_v1.RateLimit) version2.LimitReqZone {
 	return version2.LimitReqZone{
 		ZoneName: zoneName,
 		Key:      rateLimitPol.Key,
@@ -916,7 +916,7 @@ func generateLimitReqZone(zoneName string, rateLimitPol *conf_v1alpha1.RateLimit
 	}
 }
 
-func generateLimitReqOptions(rateLimitPol *conf_v1alpha1.RateLimit) version2.LimitReqOptions {
+func generateLimitReqOptions(rateLimitPol *conf_v1.RateLimit) version2.LimitReqOptions {
 	return version2.LimitReqOptions{
 		DryRun:     generateBool(rateLimitPol.DryRun, false),
 		LogLevel:   generateString(rateLimitPol.LogLevel, "error"),
@@ -1802,14 +1802,14 @@ func (vsc *virtualServerConfigurator) generateSSLConfig(owner runtime.Object, tl
 	var name string
 	var ciphers string
 
-	if secret.Error != nil {
-		name = pemFileNameForMissingTLSSecret
-		ciphers = "NULL"
-		vsc.addWarningf(owner, "TLS secret %s is invalid: %v", tls.Secret, secret.Error)
-	} else if secret.Type != api_v1.SecretTypeTLS {
+	if secret.Type != "" && secret.Type != api_v1.SecretTypeTLS {
 		name = pemFileNameForMissingTLSSecret
 		ciphers = "NULL"
 		vsc.addWarningf(owner, "TLS secret %s is of a wrong type '%s', must be '%s'", tls.Secret, secret.Type, api_v1.SecretTypeTLS)
+	} else if secret.Error != nil {
+		name = pemFileNameForMissingTLSSecret
+		ciphers = "NULL"
+		vsc.addWarningf(owner, "TLS secret %s is invalid: %v", tls.Secret, secret.Error)
 	} else {
 		name = secret.Path
 	}

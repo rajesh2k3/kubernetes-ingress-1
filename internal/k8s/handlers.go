@@ -437,19 +437,19 @@ func createTransportServerHandlers(lbc *LoadBalancerController) cache.ResourceEv
 func createPolicyHandlers(lbc *LoadBalancerController) cache.ResourceEventHandlerFuncs {
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			pol := obj.(*conf_v1alpha1.Policy)
+			pol := obj.(*conf_v1.Policy)
 			glog.V(3).Infof("Adding Policy: %v", pol.Name)
 			lbc.AddSyncQueue(pol)
 		},
 		DeleteFunc: func(obj interface{}) {
-			pol, isPol := obj.(*conf_v1alpha1.Policy)
+			pol, isPol := obj.(*conf_v1.Policy)
 			if !isPol {
 				deletedState, ok := obj.(cache.DeletedFinalStateUnknown)
 				if !ok {
 					glog.V(3).Infof("Error received unexpected object: %v", obj)
 					return
 				}
-				pol, ok = deletedState.Obj.(*conf_v1alpha1.Policy)
+				pol, ok = deletedState.Obj.(*conf_v1.Policy)
 				if !ok {
 					glog.V(3).Infof("Error DeletedFinalStateUnknown contained non-Policy object: %v", deletedState.Obj)
 					return
@@ -459,10 +459,52 @@ func createPolicyHandlers(lbc *LoadBalancerController) cache.ResourceEventHandle
 			lbc.AddSyncQueue(pol)
 		},
 		UpdateFunc: func(old, cur interface{}) {
-			curPol := cur.(*conf_v1alpha1.Policy)
+			curPol := cur.(*conf_v1.Policy)
 			if !reflect.DeepEqual(old, cur) {
 				glog.V(3).Infof("Policy %v changed, syncing", curPol.Name)
 				lbc.AddSyncQueue(curPol)
+			}
+		},
+	}
+}
+
+func createNginxCisConnectorHandlers(lbc *LoadBalancerController) cache.ResourceEventHandlerFuncs {
+	return cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			con := obj.(*unstructured.Unstructured)
+			glog.V(3).Infof("Adding NginxCisConnector: %v", con.GetName())
+			lbc.AddSyncQueue(con)
+		},
+		DeleteFunc: func(obj interface{}) {
+			con, isUnstructured := obj.(*unstructured.Unstructured)
+
+			if !isUnstructured {
+				deletedState, ok := obj.(cache.DeletedFinalStateUnknown)
+				if !ok {
+					glog.V(3).Infof("Error received unexpected object: %v", obj)
+					return
+				}
+				con, ok = deletedState.Obj.(*unstructured.Unstructured)
+				if !ok {
+					glog.V(3).Infof("Error DeletedFinalStateUnknown contained non-Unstructured object: %v", deletedState.Obj)
+					return
+				}
+			}
+
+			glog.V(3).Infof("Removing NginxCisConnector: %v", con.GetName())
+			lbc.AddSyncQueue(con)
+		},
+		UpdateFunc: func(old, cur interface{}) {
+			oldCon := old.(*unstructured.Unstructured)
+			curCon := cur.(*unstructured.Unstructured)
+			updated, err := compareSpecs(oldCon, curCon)
+			if err != nil {
+				glog.V(3).Infof("Error when comparing NginxCisConnectors: %v", err)
+				lbc.AddSyncQueue(curCon)
+			}
+			if updated {
+				glog.V(3).Infof("NginxCisConnector %v changed, syncing", oldCon.GetName())
+				lbc.AddSyncQueue(curCon)
 			}
 		},
 	}
@@ -535,6 +577,33 @@ func createAppProtectLogConfHandlers(lbc *LoadBalancerController) cache.Resource
 			if updated {
 				glog.V(3).Infof("ApLogConf %v changed, syncing", oldConf.GetName())
 				lbc.AddSyncQueue(newConf)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			lbc.AddSyncQueue(obj)
+		},
+	}
+	return handlers
+}
+
+func createAppProtectUserSigHandlers(lbc *LoadBalancerController) cache.ResourceEventHandlerFuncs {
+	handlers := cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			sig := obj.(*unstructured.Unstructured)
+			glog.V(3).Infof("Adding AppProtectUserSig: %v", sig.GetName())
+			lbc.AddSyncQueue(sig)
+		},
+		UpdateFunc: func(oldObj, obj interface{}) {
+			oldSig := oldObj.(*unstructured.Unstructured)
+			newSig := obj.(*unstructured.Unstructured)
+			updated, err := compareSpecs(oldSig, newSig)
+			if err != nil {
+				glog.V(3).Infof("Error when comparing UserSigs %v", err)
+				lbc.AddSyncQueue(newSig)
+			}
+			if updated {
+				glog.V(3).Infof("ApUserSig %v changed, syncing", oldSig.GetName())
+				lbc.AddSyncQueue(newSig)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {

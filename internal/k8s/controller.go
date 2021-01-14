@@ -82,6 +82,26 @@ var (
 		Version: "v1beta1",
 		Kind:    "APLogConf",
 	}
+	nginxCisConnectorGVR = schema.GroupVersionResource{
+		Group:    "cis.f5.com",
+		Version:  "v1",
+		Resource: "nginxcisconnectors",
+	}
+	appProtectUserSigGVR = schema.GroupVersionResource{
+		Group:    "appprotect.f5.com",
+		Version:  "v1beta1",
+		Resource: "apusersigs",
+	}
+	appProtectUserSigGVK = schema.GroupVersionKind{
+		Group:   "appprotect.f5.com",
+		Version: "v1beta1",
+		Kind:    "APUserSig",
+	}
+	nginxCisConnectorGVK = schema.GroupVersionKind{
+		Group:   "cis.f5.com",
+		Version: "v1",
+		Kind:    "NginxCisConnector",
+	}
 )
 
 type podEndpoint struct {
@@ -108,9 +128,11 @@ type LoadBalancerController struct {
 	dynInformerFactory            dynamicinformer.DynamicSharedInformerFactory
 	appProtectPolicyInformer      cache.SharedIndexInformer
 	appProtectLogConfInformer     cache.SharedIndexInformer
+	appProtectUserSigInformer     cache.SharedIndexInformer
 	globalConfigurationController cache.Controller
 	transportServerController     cache.Controller
 	policyController              cache.Controller
+	nginxCisConnectorInformer     cache.SharedIndexInformer
 	ingressLister                 storeToIngressLister
 	svcLister                     cache.Store
 	endpointLister                storeToEndpointLister
@@ -122,16 +144,19 @@ type LoadBalancerController struct {
 	appProtectPolicyLister        cache.Store
 	appProtectLogConfLister       cache.Store
 	globalConfigurationLister     cache.Store
+	appProtectUserSigLister       cache.Store
 	transportServerLister         cache.Store
 	policyLister                  cache.Store
+	nginxCisConnectorLister       cache.Store
 	syncQueue                     *taskQueue
 	ctx                           context.Context
 	cancel                        context.CancelFunc
 	configurator                  *configs.Configurator
 	watchNginxConfigMaps          bool
-	appProtectEnabled             bool
 	watchGlobalConfiguration      bool
+	watchNginxCisConnector        bool
 	isNginxPlus                   bool
+	appProtectEnabled             bool
 	recorder                      record.EventRecorder
 	defaultServerSecret           string
 	ingressClass                  string
@@ -146,6 +171,7 @@ type LoadBalancerController struct {
 	controllerNamespace           string
 	wildcardTLSSecret             string
 	areCustomResourcesEnabled     bool
+	enablePreviewPolicies         bool
 	metricsCollector              collectors.ControllerCollector
 	globalConfigurationValidator  *validation.GlobalConfigurationValidator
 	transportServerValidator      *validation.TransportServerValidator
@@ -157,6 +183,7 @@ type LoadBalancerController struct {
 	isLatencyMetricsEnabled       bool
 	configuration                 *Configuration
 	secretStore                   secrets.SecretStore
+	appProtectConfiguration       *AppProtectConfiguration
 }
 
 var keyFunc = cache.DeletionHandlingMetaNamespaceKeyFunc
@@ -175,6 +202,7 @@ type NewLoadBalancerControllerInput struct {
 	IngressClass                 string
 	UseIngressClassOnly          bool
 	ExternalServiceName          string
+	NginxCisConnector            string
 	ControllerNamespace          string
 	ReportIngressStatus          bool
 	IsLeaderElectionEnabled      bool
@@ -183,6 +211,7 @@ type NewLoadBalancerControllerInput struct {
 	ConfigMaps                   string
 	GlobalConfiguration          string
 	AreCustomResourcesEnabled    bool
+	EnablePreviewPolicies        bool
 	MetricsCollector             collectors.ControllerCollector
 	GlobalConfigurationValidator *validation.GlobalConfigurationValidator
 	TransportServerValidator     *validation.TransportServerValidator
@@ -213,6 +242,7 @@ func NewLoadBalancerController(input NewLoadBalancerControllerInput) *LoadBalanc
 		controllerNamespace:          input.ControllerNamespace,
 		wildcardTLSSecret:            input.WildcardTLSSecret,
 		areCustomResourcesEnabled:    input.AreCustomResourcesEnabled,
+		enablePreviewPolicies:        input.EnablePreviewPolicies,
 		metricsCollector:             input.MetricsCollector,
 		globalConfigurationValidator: input.GlobalConfigurationValidator,
 		transportServerValidator:     input.TransportServerValidator,
@@ -250,6 +280,7 @@ func NewLoadBalancerController(input NewLoadBalancerControllerInput) *LoadBalanc
 		lbc.dynInformerFactory = dynamicinformer.NewDynamicSharedInformerFactory(lbc.dynClient, 0)
 		lbc.addAppProtectPolicyHandler(createAppProtectPolicyHandlers(lbc))
 		lbc.addAppProtectLogConfHandler(createAppProtectLogConfHandlers(lbc))
+		lbc.addAppProtectUserSigHandler(createAppProtectUserSigHandlers(lbc))
 	}
 
 	if lbc.areCustomResourcesEnabled {
@@ -277,6 +308,11 @@ func NewLoadBalancerController(input NewLoadBalancerControllerInput) *LoadBalanc
 		}
 	}
 
+	if input.NginxCisConnector != "" {
+		lbc.watchNginxCisConnector = true
+		lbc.addNginxCisConnectorHandler(createNginxCisConnectorHandlers(lbc), input.NginxCisConnector)
+	}
+
 	if input.IsLeaderElectionEnabled {
 		lbc.addLeaderHandler(createLeaderHandler(lbc))
 	}
@@ -298,6 +334,8 @@ func NewLoadBalancerController(input NewLoadBalancerControllerInput) *LoadBalanc
 		input.AppProtectEnabled,
 		input.InternalRoutesEnabled,
 		input.VirtualServerValidator)
+
+	lbc.appProtectConfiguration = NewAppProtectConfiguration()
 
 	lbc.secretStore = secrets.NewLocalSecretStore(lbc.configurator)
 
@@ -331,6 +369,13 @@ func (lbc *LoadBalancerController) addAppProtectLogConfHandler(handlers cache.Re
 	lbc.appProtectLogConfInformer = lbc.dynInformerFactory.ForResource(appProtectLogConfGVR).Informer()
 	lbc.appProtectLogConfLister = lbc.appProtectLogConfInformer.GetStore()
 	lbc.appProtectLogConfInformer.AddEventHandler(handlers)
+}
+
+// addappProtectUserSigHandler creates dynamic informer for custom appprotect user defined signature resource
+func (lbc *LoadBalancerController) addAppProtectUserSigHandler(handlers cache.ResourceEventHandlerFuncs) {
+	lbc.appProtectUserSigInformer = lbc.dynInformerFactory.ForResource(appProtectUserSigGVR).Informer()
+	lbc.appProtectUserSigLister = lbc.appProtectUserSigInformer.GetStore()
+	lbc.appProtectUserSigInformer.AddEventHandler(handlers)
 }
 
 // addSecretHandler adds the handler for secrets to the controller
@@ -443,6 +488,19 @@ func (lbc *LoadBalancerController) addVirtualServerRouteHandler(handlers cache.R
 	)
 }
 
+func (lbc *LoadBalancerController) addPolicyHandler(handlers cache.ResourceEventHandlerFuncs) {
+	lbc.policyLister, lbc.policyController = cache.NewInformer(
+		cache.NewListWatchFromClient(
+			lbc.confClient.K8sV1().RESTClient(),
+			"policies",
+			lbc.namespace,
+			fields.Everything()),
+		&conf_v1.Policy{},
+		lbc.resync,
+		handlers,
+	)
+}
+
 func (lbc *LoadBalancerController) addGlobalConfigurationHandler(handlers cache.ResourceEventHandlerFuncs, namespace string, name string) {
 	lbc.globalConfigurationLister, lbc.globalConfigurationController = cache.NewInformer(
 		cache.NewListWatchFromClient(
@@ -469,17 +527,18 @@ func (lbc *LoadBalancerController) addTransportServerHandler(handlers cache.Reso
 	)
 }
 
-func (lbc *LoadBalancerController) addPolicyHandler(handlers cache.ResourceEventHandlerFuncs) {
-	lbc.policyLister, lbc.policyController = cache.NewInformer(
-		cache.NewListWatchFromClient(
-			lbc.confClient.K8sV1alpha1().RESTClient(),
-			"policies",
-			lbc.namespace,
-			fields.Everything()),
-		&conf_v1alpha1.Policy{},
-		lbc.resync,
-		handlers,
-	)
+func (lbc *LoadBalancerController) addNginxCisConnectorHandler(handlers cache.ResourceEventHandlerFuncs, name string) {
+	optionsModifier := func(options *meta_v1.ListOptions) {
+		options.FieldSelector = fields.Set{"metadata.name": name}.String()
+	}
+
+	informer := dynamicinformer.NewFilteredDynamicInformer(lbc.dynClient, nginxCisConnectorGVR, lbc.controllerNamespace, lbc.resync,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, optionsModifier)
+
+	informer.Informer().AddEventHandlerWithResyncPeriod(handlers, lbc.resync)
+
+	lbc.nginxCisConnectorInformer = informer.Informer()
+	lbc.nginxCisConnectorLister = informer.Informer().GetStore()
 }
 
 // Run starts the loadbalancer controller
@@ -516,6 +575,9 @@ func (lbc *LoadBalancerController) Run() {
 	}
 	if lbc.watchGlobalConfiguration {
 		go lbc.globalConfigurationController.Run(lbc.ctx.Done())
+	}
+	if lbc.watchNginxCisConnector {
+		go lbc.nginxCisConnectorInformer.Run(lbc.ctx.Done())
 	}
 
 	go lbc.syncQueue.Run(time.Second, lbc.ctx.Done())
@@ -593,11 +655,11 @@ func (lbc *LoadBalancerController) createExtendedResources(resources []Resource)
 
 	for _, r := range resources {
 		switch impl := r.(type) {
-		case *FullVirtualServer:
+		case *VirtualServerConfiguration:
 			vs := impl.VirtualServer
 			vsEx := lbc.createVirtualServerEx(vs, impl.VirtualServerRoutes)
 			virtualServersExes = append(virtualServersExes, vsEx)
-		case *FullIngress:
+		case *IngressConfiguration:
 			if impl.IsMaster {
 				mergeableIng := lbc.createMergeableIngresses(impl)
 				mergeableIngresses = append(mergeableIngresses, mergeableIng)
@@ -704,11 +766,71 @@ func (lbc *LoadBalancerController) sync(task task) {
 		lbc.syncAppProtectPolicy(task)
 	case appProtectLogConf:
 		lbc.syncAppProtectLogConf(task)
+	case appProtectUserSig:
+		lbc.syncAppProtectUserSig(task)
+	case nginxCisConnector:
+		lbc.syncNginxCisConnector(task)
 	}
 
 	if !lbc.isNginxReady && lbc.syncQueue.Len() == 0 {
 		lbc.isNginxReady = true
 		glog.V(3).Infof("NGINX is ready")
+	}
+}
+
+func (lbc *LoadBalancerController) syncNginxCisConnector(task task) {
+	key := task.Key
+	glog.V(2).Infof("Adding, Updating or Deleting NginxCisConnector: %v", key)
+
+	obj, exists, err := lbc.nginxCisConnectorLister.GetByKey(key)
+	if err != nil {
+		lbc.syncQueue.Requeue(task, err)
+		return
+	}
+
+	if !exists {
+		// connector got removed
+		lbc.statusUpdater.ClearStatusFromNginxCisConnector()
+	} else {
+		// connector is added or updated
+		con := obj.(*unstructured.Unstructured)
+
+		// spec.virtualServerAddress contains the IP of the BIG-IP device
+		ip, found, err := unstructured.NestedString(con.Object, "spec", "virtualServerAddress")
+		if err != nil {
+			glog.Errorf("Failed to get virtualServerAddress from NginxCisConnector %s: %v", key, err)
+			lbc.statusUpdater.ClearStatusFromNginxCisConnector()
+		} else if !found {
+			glog.Errorf("virtualServerAddress is not found in NginxCisConnector %s", key)
+			lbc.statusUpdater.ClearStatusFromNginxCisConnector()
+		} else if ip == "" {
+			glog.Warningf("NginxCisConnector %s has the empty virtualServerAddress field", key)
+			lbc.statusUpdater.ClearStatusFromNginxCisConnector()
+		} else {
+			lbc.statusUpdater.SaveStatusFromNginxCisConnector(ip)
+		}
+	}
+
+	if lbc.reportStatusEnabled() {
+		ingresses := lbc.configuration.GetResourcesWithFilter(resourceFilter{Ingresses: true})
+
+		glog.V(3).Infof("Updating status for %v Ingresses", len(ingresses))
+
+		err := lbc.statusUpdater.UpdateExternalEndpointsForResources(ingresses)
+		if err != nil {
+			glog.Errorf("Error updating ingress status in syncNginxCisConnector: %v", err)
+		}
+	}
+
+	if lbc.areCustomResourcesEnabled && lbc.reportVsVsrStatusEnabled() {
+		virtualServers := lbc.configuration.GetResourcesWithFilter(resourceFilter{VirtualServers: true})
+
+		glog.V(3).Infof("Updating status for %v VirtualServers", len(virtualServers))
+
+		err := lbc.statusUpdater.UpdateExternalEndpointsForResources(virtualServers)
+		if err != nil {
+			glog.V(3).Infof("Error updating VirtualServer/VirtualServerRoute status in syncNginxCisConnector: %v", err)
+		}
 	}
 }
 
@@ -723,8 +845,8 @@ func (lbc *LoadBalancerController) syncPolicy(task task) {
 	glog.V(2).Infof("Adding, Updating or Deleting Policy: %v\n", key)
 
 	if polExists {
-		pol := obj.(*conf_v1alpha1.Policy)
-		err := validation.ValidatePolicy(pol, lbc.isNginxPlus)
+		pol := obj.(*conf_v1.Policy)
+		err := validation.ValidatePolicy(pol, lbc.isNginxPlus, lbc.enablePreviewPolicies)
 		if err != nil {
 			lbc.recorder.Eventf(pol, api_v1.EventTypeWarning, "Rejected", "Policy %v is invalid and was rejected: %v", key, err)
 		} else {
@@ -934,12 +1056,12 @@ func (lbc *LoadBalancerController) processChanges(changes []ResourceChange) {
 	for _, c := range changes {
 		if c.Op == AddOrUpdate {
 			switch impl := c.Resource.(type) {
-			case *FullVirtualServer:
+			case *VirtualServerConfiguration:
 				vsEx := lbc.createVirtualServerEx(impl.VirtualServer, impl.VirtualServerRoutes)
 
 				warnings, addOrUpdateErr := lbc.configurator.AddOrUpdateVirtualServer(vsEx)
 				lbc.updateVirtualServerStatusAndEvents(impl, warnings, addOrUpdateErr)
-			case *FullIngress:
+			case *IngressConfiguration:
 				if impl.IsMaster {
 					mergeableIng := lbc.createMergeableIngresses(impl)
 
@@ -955,7 +1077,7 @@ func (lbc *LoadBalancerController) processChanges(changes []ResourceChange) {
 			}
 		} else if c.Op == Delete {
 			switch impl := c.Resource.(type) {
-			case *FullVirtualServer:
+			case *VirtualServerConfiguration:
 				key := getResourceKey(&impl.VirtualServer.ObjectMeta)
 
 				deleteErr := lbc.configurator.DeleteVirtualServer(key)
@@ -971,7 +1093,7 @@ func (lbc *LoadBalancerController) processChanges(changes []ResourceChange) {
 				if vsExists {
 					lbc.UpdateVirtualServerStatusAndEventsOnDelete(impl, c.Error, deleteErr)
 				}
-			case *FullIngress:
+			case *IngressConfiguration:
 				key := getResourceKey(&impl.Ingress.ObjectMeta)
 
 				glog.V(2).Infof("Deleting Ingress: %v\n", key)
@@ -994,7 +1116,103 @@ func (lbc *LoadBalancerController) processChanges(changes []ResourceChange) {
 	}
 }
 
-func (lbc *LoadBalancerController) UpdateVirtualServerStatusAndEventsOnDelete(fullVS *FullVirtualServer, changeError string, deleteErr error) {
+func (lbc *LoadBalancerController) processAppProtectChanges(changes []AppProtectChange) {
+	glog.V(3).Infof("Processing %v App Protect changes", len(changes))
+
+	for _, c := range changes {
+		if c.Op == AddOrUpdate {
+			switch impl := c.Resource.(type) {
+			case *AppProtectPolicyEx:
+				namespace := impl.Obj.GetNamespace()
+				name := impl.Obj.GetName()
+				resources := lbc.configuration.FindResourcesForAppProtectPolicy(namespace, name)
+
+				ingressExes, mergeableIngresses, _ := lbc.createExtendedResources(resources)
+
+				warnings, updateErr := lbc.configurator.AddOrUpdateAppProtectResource(impl.Obj, ingressExes, mergeableIngresses)
+				lbc.updateResourcesStatusAndEvents(resources, warnings, updateErr)
+				lbc.recorder.Eventf(impl.Obj, api_v1.EventTypeNormal, "AddedOrUpdated", "AppProtectPolicy %v was added or updated", namespace+"/"+name)
+			case *AppProtectLogConfEx:
+				namespace := impl.Obj.GetNamespace()
+				name := impl.Obj.GetName()
+				resources := lbc.configuration.FindResourcesForAppProtectLogConf(namespace, name)
+
+				ingressExes, mergeableIngresses, _ := lbc.createExtendedResources(resources)
+
+				warnings, updateErr := lbc.configurator.AddOrUpdateAppProtectResource(impl.Obj, ingressExes, mergeableIngresses)
+				lbc.updateResourcesStatusAndEvents(resources, warnings, updateErr)
+				lbc.recorder.Eventf(impl.Obj, api_v1.EventTypeNormal, "AddedOrUpdated", "AppProtectLogConfig  %v was added or updated", namespace+"/"+name)
+			}
+		} else if c.Op == Delete {
+			switch impl := c.Resource.(type) {
+			case *AppProtectPolicyEx:
+				namespace := impl.Obj.GetNamespace()
+				name := impl.Obj.GetName()
+				resources := lbc.configuration.FindResourcesForAppProtectPolicy(namespace, name)
+
+				ingressExes, mergeableIngresses, _ := lbc.createExtendedResources(resources)
+
+				warnings, deleteErr := lbc.configurator.DeleteAppProtectPolicy(namespace+"/"+name, ingressExes, mergeableIngresses)
+
+				lbc.updateResourcesStatusAndEvents(resources, warnings, deleteErr)
+
+			case *AppProtectLogConfEx:
+				namespace := impl.Obj.GetNamespace()
+				name := impl.Obj.GetName()
+				resources := lbc.configuration.FindResourcesForAppProtectLogConf(namespace, name)
+
+				ingressExes, mergeableIngresses, _ := lbc.createExtendedResources(resources)
+
+				warnings, deleteErr := lbc.configurator.DeleteAppProtectLogConf(namespace+"/"+name, ingressExes, mergeableIngresses)
+
+				lbc.updateResourcesStatusAndEvents(resources, warnings, deleteErr)
+			}
+		}
+	}
+}
+
+func (lbc *LoadBalancerController) processAppProtectUserSigChange(change AppProtectUserSigChange) {
+	var delPols []string
+	var allIngExes []*configs.IngressEx
+	var allMergeableIngresses []*configs.MergeableIngresses
+	var allResources []Resource
+
+	for _, poladd := range change.PolicyAddsOrUpdates {
+		resources := lbc.configuration.FindResourcesForAppProtectPolicy(poladd.GetNamespace(), poladd.GetName())
+		ingressExes, mergeableIngresses, _ := lbc.createExtendedResources(resources)
+		allIngExes = append(allIngExes, ingressExes...)
+		allMergeableIngresses = append(allMergeableIngresses, mergeableIngresses...)
+		allResources = append(allResources, resources...)
+	}
+	for _, poldel := range change.PolicyDeletions {
+		polNsName := getNsName(poldel)
+		resources := lbc.configuration.FindResourcesForAppProtectPolicy(poldel.GetNamespace(), poldel.GetName())
+		ingressExes, mergeableIngresses, _ := lbc.createExtendedResources(resources)
+		allIngExes = append(allIngExes, ingressExes...)
+		allMergeableIngresses = append(allMergeableIngresses, mergeableIngresses...)
+		allResources = append(allResources, resources...)
+		if len(ingressExes) > 0 || len(mergeableIngresses) > 0 {
+			delPols = append(delPols, polNsName)
+		}
+	}
+
+	warnings, err := lbc.configurator.RefreshAppProtectUserSigs(change.UserSigs, delPols, allIngExes, allMergeableIngresses)
+	if err != nil {
+		glog.Errorf("Error when refreshing App Protect Policy User defined signatures: %v", err)
+	}
+	lbc.updateResourcesStatusAndEvents(allResources, warnings, err)
+}
+
+func (lbc *LoadBalancerController) processAppProtectProblems(problems []AppProtectProblem) {
+	glog.V(3).Infof("Processing %v App Protet problems", len(problems))
+
+	for _, p := range problems {
+		eventType := api_v1.EventTypeWarning
+		lbc.recorder.Event(p.Object, eventType, p.Reason, p.Message)
+	}
+}
+
+func (lbc *LoadBalancerController) UpdateVirtualServerStatusAndEventsOnDelete(vsConfig *VirtualServerConfiguration, changeError string, deleteErr error) {
 	eventType := api_v1.EventTypeWarning
 	eventTitle := "Rejected"
 	eventWarningMessage := ""
@@ -1004,8 +1222,8 @@ func (lbc *LoadBalancerController) UpdateVirtualServerStatusAndEventsOnDelete(fu
 	if changeError != "" {
 		eventWarningMessage = fmt.Sprintf("with error: %s", changeError)
 		state = conf_v1.StateInvalid
-	} else if len(fullVS.Warnings) > 0 {
-		eventWarningMessage = fmt.Sprintf("with warning(s): %s", formatWarningMessages(fullVS.Warnings))
+	} else if len(vsConfig.Warnings) > 0 {
+		eventWarningMessage = fmt.Sprintf("with warning(s): %s", formatWarningMessages(vsConfig.Warnings))
 		state = conf_v1.StateWarning
 	}
 
@@ -1020,14 +1238,14 @@ func (lbc *LoadBalancerController) UpdateVirtualServerStatusAndEventsOnDelete(fu
 			state = conf_v1.StateInvalid
 		}
 
-		msg := fmt.Sprintf("VirtualServer %s was rejected %s", getResourceKey(&fullVS.VirtualServer.ObjectMeta), eventWarningMessage)
-		lbc.recorder.Eventf(fullVS.VirtualServer, eventType, eventTitle, msg)
+		msg := fmt.Sprintf("VirtualServer %s was rejected %s", getResourceKey(&vsConfig.VirtualServer.ObjectMeta), eventWarningMessage)
+		lbc.recorder.Eventf(vsConfig.VirtualServer, eventType, eventTitle, msg)
 
 		if lbc.reportVsVsrStatusEnabled() {
-			err := lbc.statusUpdater.UpdateVirtualServerStatus(fullVS.VirtualServer, state, eventTitle, msg)
+			err := lbc.statusUpdater.UpdateVirtualServerStatus(vsConfig.VirtualServer, state, eventTitle, msg)
 
 			if err != nil {
-				glog.Errorf("Error when updating the status for VirtualServer %v/%v: %v", fullVS.VirtualServer.Namespace, fullVS.VirtualServer.Name, err)
+				glog.Errorf("Error when updating the status for VirtualServer %v/%v: %v", vsConfig.VirtualServer.Namespace, vsConfig.VirtualServer.Name, err)
 			}
 		}
 	}
@@ -1036,15 +1254,15 @@ func (lbc *LoadBalancerController) UpdateVirtualServerStatusAndEventsOnDelete(fu
 	// for each VSR, a dedicated problem exists
 }
 
-func (lbc *LoadBalancerController) UpdateIngressStatusAndEventsOnDelete(fullIng *FullIngress, changeError string, deleteErr error) {
+func (lbc *LoadBalancerController) UpdateIngressStatusAndEventsOnDelete(ingConfig *IngressConfiguration, changeError string, deleteErr error) {
 	eventTitle := "Rejected"
 	eventWarningMessage := ""
 
 	// Ingress either became invalid or lost all its hosts
 	if changeError != "" {
 		eventWarningMessage = fmt.Sprintf("with error: %s", changeError)
-	} else if len(fullIng.Warnings) > 0 {
-		eventWarningMessage = fmt.Sprintf("with warning(s): %s", formatWarningMessages(fullIng.Warnings))
+	} else if len(ingConfig.Warnings) > 0 {
+		eventWarningMessage = fmt.Sprintf("with warning(s): %s", formatWarningMessages(ingConfig.Warnings))
 	}
 
 	// we don't need to report anything if eventWarningMessage is empty
@@ -1056,9 +1274,9 @@ func (lbc *LoadBalancerController) UpdateIngressStatusAndEventsOnDelete(fullIng 
 			eventWarningMessage = fmt.Sprintf("%s; but was not applied: %v", eventWarningMessage, deleteErr)
 		}
 
-		lbc.recorder.Eventf(fullIng.Ingress, api_v1.EventTypeWarning, eventTitle, "%v was rejected: %v", getResourceKey(&fullIng.Ingress.ObjectMeta), eventWarningMessage)
+		lbc.recorder.Eventf(ingConfig.Ingress, api_v1.EventTypeWarning, eventTitle, "%v was rejected: %v", getResourceKey(&ingConfig.Ingress.ObjectMeta), eventWarningMessage)
 		if lbc.reportStatusEnabled() {
-			err := lbc.statusUpdater.ClearIngressStatus(*fullIng.Ingress)
+			err := lbc.statusUpdater.ClearIngressStatus(*ingConfig.Ingress)
 			if err != nil {
 				glog.V(3).Infof("Error clearing Ingress status: %v", err)
 			}
@@ -1072,9 +1290,9 @@ func (lbc *LoadBalancerController) UpdateIngressStatusAndEventsOnDelete(fullIng 
 func (lbc *LoadBalancerController) updateResourcesStatusAndEvents(resources []Resource, warnings configs.Warnings, operationErr error) {
 	for _, r := range resources {
 		switch impl := r.(type) {
-		case *FullVirtualServer:
+		case *VirtualServerConfiguration:
 			lbc.updateVirtualServerStatusAndEvents(impl, warnings, operationErr)
-		case *FullIngress:
+		case *IngressConfiguration:
 			if impl.IsMaster {
 				lbc.updateMergeableIngressStatusAndEvents(impl, warnings, operationErr)
 			} else {
@@ -1084,18 +1302,18 @@ func (lbc *LoadBalancerController) updateResourcesStatusAndEvents(resources []Re
 	}
 }
 
-func (lbc *LoadBalancerController) updateMergeableIngressStatusAndEvents(fullIng *FullIngress, warnings configs.Warnings, operationErr error) {
+func (lbc *LoadBalancerController) updateMergeableIngressStatusAndEvents(ingConfig *IngressConfiguration, warnings configs.Warnings, operationErr error) {
 	eventType := api_v1.EventTypeNormal
 	eventTitle := "AddedOrUpdated"
 	eventWarningMessage := ""
 
-	if len(fullIng.Warnings) > 0 {
+	if len(ingConfig.Warnings) > 0 {
 		eventType = api_v1.EventTypeWarning
 		eventTitle = "AddedOrUpdatedWithWarning"
-		eventWarningMessage = fmt.Sprintf("with warning(s): %s", formatWarningMessages(fullIng.Warnings))
+		eventWarningMessage = fmt.Sprintf("with warning(s): %s", formatWarningMessages(ingConfig.Warnings))
 	}
 
-	if messages, ok := warnings[fullIng.Ingress]; ok {
+	if messages, ok := warnings[ingConfig.Ingress]; ok {
 		eventType = api_v1.EventTypeWarning
 		eventTitle = "AddedOrUpdatedWithWarning"
 		eventWarningMessage = fmt.Sprintf("%s; with warning(s): %v", eventWarningMessage, formatWarningMessages(messages))
@@ -1107,15 +1325,15 @@ func (lbc *LoadBalancerController) updateMergeableIngressStatusAndEvents(fullIng
 		eventWarningMessage = fmt.Sprintf("%s; but was not applied: %v", eventWarningMessage, operationErr)
 	}
 
-	msg := fmt.Sprintf("Configuration for %v was added or updated %s", getResourceKey(&fullIng.Ingress.ObjectMeta), eventWarningMessage)
-	lbc.recorder.Eventf(fullIng.Ingress, eventType, eventTitle, msg)
+	msg := fmt.Sprintf("Configuration for %v was added or updated %s", getResourceKey(&ingConfig.Ingress.ObjectMeta), eventWarningMessage)
+	lbc.recorder.Eventf(ingConfig.Ingress, eventType, eventTitle, msg)
 
-	for _, fm := range fullIng.Minions {
+	for _, fm := range ingConfig.Minions {
 		minionEventType := api_v1.EventTypeNormal
 		minionEventTitle := "AddedOrUpdated"
 		minionEventWarningMessage := ""
 
-		minionChangeWarnings := fullIng.ChildWarnings[getResourceKey(&fm.Ingress.ObjectMeta)]
+		minionChangeWarnings := ingConfig.ChildWarnings[getResourceKey(&fm.Ingress.ObjectMeta)]
 		if len(minionChangeWarnings) > 0 {
 			minionEventType = api_v1.EventTypeWarning
 			minionEventTitle = "AddedOrUpdatedWithWarning"
@@ -1139,9 +1357,9 @@ func (lbc *LoadBalancerController) updateMergeableIngressStatusAndEvents(fullIng
 	}
 
 	if lbc.reportStatusEnabled() {
-		ings := []networking.Ingress{*fullIng.Ingress}
+		ings := []networking.Ingress{*ingConfig.Ingress}
 
-		for _, fm := range fullIng.Minions {
+		for _, fm := range ingConfig.Minions {
 			ings = append(ings, *fm.Ingress)
 		}
 
@@ -1152,18 +1370,18 @@ func (lbc *LoadBalancerController) updateMergeableIngressStatusAndEvents(fullIng
 	}
 }
 
-func (lbc *LoadBalancerController) updateRegularIngressStatusAndEvents(fullIng *FullIngress, warnings configs.Warnings, operationErr error) {
+func (lbc *LoadBalancerController) updateRegularIngressStatusAndEvents(ingConfig *IngressConfiguration, warnings configs.Warnings, operationErr error) {
 	eventType := api_v1.EventTypeNormal
 	eventTitle := "AddedOrUpdated"
 	eventWarningMessage := ""
 
-	if len(fullIng.Warnings) > 0 {
+	if len(ingConfig.Warnings) > 0 {
 		eventType = api_v1.EventTypeWarning
 		eventTitle = "AddedOrUpdatedWithWarning"
-		eventWarningMessage = fmt.Sprintf("with warning(s): %s", formatWarningMessages(fullIng.Warnings))
+		eventWarningMessage = fmt.Sprintf("with warning(s): %s", formatWarningMessages(ingConfig.Warnings))
 	}
 
-	if messages, ok := warnings[fullIng.Ingress]; ok {
+	if messages, ok := warnings[ingConfig.Ingress]; ok {
 		eventType = api_v1.EventTypeWarning
 		eventTitle = "AddedOrUpdatedWithWarning"
 		eventWarningMessage = fmt.Sprintf("%s; with warning(s): %v", eventWarningMessage, formatWarningMessages(messages))
@@ -1175,31 +1393,31 @@ func (lbc *LoadBalancerController) updateRegularIngressStatusAndEvents(fullIng *
 		eventWarningMessage = fmt.Sprintf("%s; but was not applied: %v", eventWarningMessage, operationErr)
 	}
 
-	msg := fmt.Sprintf("Configuration for %v was added or updated %s", getResourceKey(&fullIng.Ingress.ObjectMeta), eventWarningMessage)
-	lbc.recorder.Eventf(fullIng.Ingress, eventType, eventTitle, msg)
+	msg := fmt.Sprintf("Configuration for %v was added or updated %s", getResourceKey(&ingConfig.Ingress.ObjectMeta), eventWarningMessage)
+	lbc.recorder.Eventf(ingConfig.Ingress, eventType, eventTitle, msg)
 
 	if lbc.reportStatusEnabled() {
-		err := lbc.statusUpdater.UpdateIngressStatus(*fullIng.Ingress)
+		err := lbc.statusUpdater.UpdateIngressStatus(*ingConfig.Ingress)
 		if err != nil {
 			glog.V(3).Infof("error updating ing status: %v", err)
 		}
 	}
 }
 
-func (lbc *LoadBalancerController) updateVirtualServerStatusAndEvents(fullVS *FullVirtualServer, warnings configs.Warnings, operationErr error) {
+func (lbc *LoadBalancerController) updateVirtualServerStatusAndEvents(vsConfig *VirtualServerConfiguration, warnings configs.Warnings, operationErr error) {
 	eventType := api_v1.EventTypeNormal
 	eventTitle := "AddedOrUpdated"
 	eventWarningMessage := ""
 	state := conf_v1.StateValid
 
-	if len(fullVS.Warnings) > 0 {
+	if len(vsConfig.Warnings) > 0 {
 		eventType = api_v1.EventTypeWarning
 		eventTitle = "AddedOrUpdatedWithWarning"
-		eventWarningMessage = fmt.Sprintf("with warning(s): %s", formatWarningMessages(fullVS.Warnings))
+		eventWarningMessage = fmt.Sprintf("with warning(s): %s", formatWarningMessages(vsConfig.Warnings))
 		state = conf_v1.StateWarning
 	}
 
-	if messages, ok := warnings[fullVS.VirtualServer]; ok {
+	if messages, ok := warnings[vsConfig.VirtualServer]; ok {
 		eventType = api_v1.EventTypeWarning
 		eventTitle = "AddedOrUpdatedWithWarning"
 		eventWarningMessage = fmt.Sprintf("%s; with warning(s): %v", eventWarningMessage, formatWarningMessages(messages))
@@ -1213,17 +1431,17 @@ func (lbc *LoadBalancerController) updateVirtualServerStatusAndEvents(fullVS *Fu
 		state = conf_v1.StateInvalid
 	}
 
-	msg := fmt.Sprintf("Configuration for %v was added or updated %s", getResourceKey(&fullVS.VirtualServer.ObjectMeta), eventWarningMessage)
-	lbc.recorder.Eventf(fullVS.VirtualServer, eventType, eventTitle, msg)
+	msg := fmt.Sprintf("Configuration for %v was added or updated %s", getResourceKey(&vsConfig.VirtualServer.ObjectMeta), eventWarningMessage)
+	lbc.recorder.Eventf(vsConfig.VirtualServer, eventType, eventTitle, msg)
 
 	if lbc.reportVsVsrStatusEnabled() {
-		err := lbc.statusUpdater.UpdateVirtualServerStatus(fullVS.VirtualServer, state, eventTitle, msg)
+		err := lbc.statusUpdater.UpdateVirtualServerStatus(vsConfig.VirtualServer, state, eventTitle, msg)
 		if err != nil {
-			glog.Errorf("Error when updating the status for VirtualServer %v/%v: %v", fullVS.VirtualServer.Namespace, fullVS.VirtualServer.Name, err)
+			glog.Errorf("Error when updating the status for VirtualServer %v/%v: %v", vsConfig.VirtualServer.Namespace, vsConfig.VirtualServer.Name, err)
 		}
 	}
 
-	for _, vsr := range fullVS.VirtualServerRoutes {
+	for _, vsr := range vsConfig.VirtualServerRoutes {
 		vsrEventType := api_v1.EventTypeNormal
 		vsrEventTitle := "AddedOrUpdated"
 		vsrEventWarningMessage := ""
@@ -1247,7 +1465,7 @@ func (lbc *LoadBalancerController) updateVirtualServerStatusAndEvents(fullVS *Fu
 		lbc.recorder.Eventf(vsr, vsrEventType, vsrEventTitle, msg)
 
 		if lbc.reportVsVsrStatusEnabled() {
-			vss := []*conf_v1.VirtualServer{fullVS.VirtualServer}
+			vss := []*conf_v1.VirtualServer{vsConfig.VirtualServer}
 			err := lbc.statusUpdater.UpdateVirtualServerRouteStatusWithReferencedBy(vsr, vsrState, vsrEventTitle, msg, vss)
 			if err != nil {
 				glog.Errorf("Error when updating the status for VirtualServerRoute %v/%v: %v", vsr.Namespace, vsr.Name, err)
@@ -1732,14 +1950,14 @@ func getIPAddressesFromEndpoints(endpoints []podEndpoint) []string {
 	return endps
 }
 
-func (lbc *LoadBalancerController) createMergeableIngresses(fullIng *FullIngress) *configs.MergeableIngresses {
+func (lbc *LoadBalancerController) createMergeableIngresses(ingConfig *IngressConfiguration) *configs.MergeableIngresses {
 	// for master Ingress, validMinionPaths are nil
-	masterIngressEx := lbc.createIngressEx(fullIng.Ingress, fullIng.ValidHosts, nil)
+	masterIngressEx := lbc.createIngressEx(ingConfig.Ingress, ingConfig.ValidHosts, nil)
 
 	var minions []*configs.IngressEx
 
-	for _, fm := range fullIng.Minions {
-		minions = append(minions, lbc.createIngressEx(fm.Ingress, fullIng.ValidHosts, fm.ValidPaths))
+	for _, m := range ingConfig.Minions {
+		minions = append(minions, lbc.createIngressEx(m.Ingress, ingConfig.ValidHosts, m.ValidPaths))
 	}
 
 	return &configs.MergeableIngresses{
@@ -1922,19 +2140,9 @@ func (lbc *LoadBalancerController) getAppProtectLogConfAndDst(ing *networking.In
 		return nil, "", fmt.Errorf("Error Validating App Protect Destination Config for Ingress %v: %v", ing.Name, err)
 	}
 
-	logConfObj, exists, err := lbc.appProtectLogConfLister.GetByKey(logConfNsN)
+	logConf, err = lbc.appProtectConfiguration.GetAppResource(appProtectLogConfGVK.Kind, logConfNsN)
 	if err != nil {
 		return nil, "", fmt.Errorf("Error retrieving App Protect Log Config for Ingress %v: %v", ing.Name, err)
-	}
-
-	if !exists {
-		return nil, "", fmt.Errorf("Error retrieving App Protect Log Config for Ingress %v: %v does not exist", ing.Name, logConfNsN)
-	}
-
-	logConf = logConfObj.(*unstructured.Unstructured)
-	err = ValidateAppProtectLogConf(logConf)
-	if err != nil {
-		return nil, "", fmt.Errorf("Error validating App Protect Log Config  for Ingress %v: %v", ing.Name, err)
 	}
 
 	return logConf, logDst, nil
@@ -1943,20 +2151,11 @@ func (lbc *LoadBalancerController) getAppProtectLogConfAndDst(ing *networking.In
 func (lbc *LoadBalancerController) getAppProtectPolicy(ing *networking.Ingress) (apPolicy *unstructured.Unstructured, err error) {
 	polNsN := ParseResourceReferenceAnnotation(ing.Namespace, ing.Annotations[configs.AppProtectPolicyAnnotation])
 
-	apPolicyObj, exists, err := lbc.appProtectPolicyLister.GetByKey(polNsN)
+	apPolicy, err = lbc.appProtectConfiguration.GetAppResource(appProtectPolicyGVK.Kind, polNsN)
 	if err != nil {
-		return nil, fmt.Errorf("Error retrieving App Protect Policy name for Ingress %v: %v ", ing.Name, err)
+		return nil, fmt.Errorf("Error retrieving App Protect Policy for Ingress %v: %v ", ing.Name, err)
 	}
 
-	if !exists {
-		return nil, fmt.Errorf("Error retrieving App Protect Policy for Ingress %v: %v does not exist", ing.Name, polNsN)
-	}
-
-	apPolicy = apPolicyObj.(*unstructured.Unstructured)
-	err = ValidateAppProtectPolicy(apPolicy)
-	if err != nil {
-		return nil, fmt.Errorf("Error validating App Protect Policy %v for Ingress %v: %v", apPolicy.GetName(), ing.Name, err)
-	}
 	return apPolicy, nil
 }
 
@@ -2113,8 +2312,8 @@ func (lbc *LoadBalancerController) createVirtualServerEx(virtualServer *conf_v1.
 	return &virtualServerEx
 }
 
-func createPolicyMap(policies []*conf_v1alpha1.Policy) map[string]*conf_v1alpha1.Policy {
-	result := make(map[string]*conf_v1alpha1.Policy)
+func createPolicyMap(policies []*conf_v1.Policy) map[string]*conf_v1.Policy {
+	result := make(map[string]*conf_v1.Policy)
 
 	for _, p := range policies {
 		key := fmt.Sprintf("%s/%s", p.Namespace, p.Name)
@@ -2124,13 +2323,13 @@ func createPolicyMap(policies []*conf_v1alpha1.Policy) map[string]*conf_v1alpha1
 	return result
 }
 
-func (lbc *LoadBalancerController) getAllPolicies() []*conf_v1alpha1.Policy {
-	var policies []*conf_v1alpha1.Policy
+func (lbc *LoadBalancerController) getAllPolicies() []*conf_v1.Policy {
+	var policies []*conf_v1.Policy
 
 	for _, obj := range lbc.policyLister.List() {
-		pol := obj.(*conf_v1alpha1.Policy)
+		pol := obj.(*conf_v1.Policy)
 
-		err := validation.ValidatePolicy(pol, lbc.isNginxPlus)
+		err := validation.ValidatePolicy(pol, lbc.isNginxPlus, lbc.enablePreviewPolicies)
 		if err != nil {
 			glog.V(3).Infof("Skipping invalid Policy %s/%s: %v", pol.Namespace, pol.Name, err)
 			continue
@@ -2142,8 +2341,8 @@ func (lbc *LoadBalancerController) getAllPolicies() []*conf_v1alpha1.Policy {
 	return policies
 }
 
-func (lbc *LoadBalancerController) getPolicies(policies []conf_v1.PolicyReference, ownerNamespace string) ([]*conf_v1alpha1.Policy, []error) {
-	var result []*conf_v1alpha1.Policy
+func (lbc *LoadBalancerController) getPolicies(policies []conf_v1.PolicyReference, ownerNamespace string) ([]*conf_v1.Policy, []error) {
+	var result []*conf_v1.Policy
 	var errors []error
 
 	for _, p := range policies {
@@ -2165,9 +2364,9 @@ func (lbc *LoadBalancerController) getPolicies(policies []conf_v1.PolicyReferenc
 			continue
 		}
 
-		policy := policyObj.(*conf_v1alpha1.Policy)
+		policy := policyObj.(*conf_v1.Policy)
 
-		err = validation.ValidatePolicy(policy, lbc.isNginxPlus)
+		err = validation.ValidatePolicy(policy, lbc.isNginxPlus, lbc.enablePreviewPolicies)
 		if err != nil {
 			errors = append(errors, fmt.Errorf("Policy %s is invalid: %v", policyKey, err))
 			continue
@@ -2179,7 +2378,7 @@ func (lbc *LoadBalancerController) getPolicies(policies []conf_v1.PolicyReferenc
 	return result, errors
 }
 
-func (lbc *LoadBalancerController) addJWTSecretRefs(secretRefs map[string]*secrets.SecretReference, policies []*conf_v1alpha1.Policy) error {
+func (lbc *LoadBalancerController) addJWTSecretRefs(secretRefs map[string]*secrets.SecretReference, policies []*conf_v1.Policy) error {
 	for _, pol := range policies {
 		if pol.Spec.JWTAuth == nil {
 			continue
@@ -2198,7 +2397,7 @@ func (lbc *LoadBalancerController) addJWTSecretRefs(secretRefs map[string]*secre
 	return nil
 }
 
-func (lbc *LoadBalancerController) addIngressMTLSSecretRefs(secretRefs map[string]*secrets.SecretReference, policies []*conf_v1alpha1.Policy) error {
+func (lbc *LoadBalancerController) addIngressMTLSSecretRefs(secretRefs map[string]*secrets.SecretReference, policies []*conf_v1.Policy) error {
 	for _, pol := range policies {
 		if pol.Spec.IngressMTLS == nil {
 			continue
@@ -2215,7 +2414,7 @@ func (lbc *LoadBalancerController) addIngressMTLSSecretRefs(secretRefs map[strin
 	return nil
 }
 
-func (lbc *LoadBalancerController) addEgressMTLSSecretRefs(secretRefs map[string]*secrets.SecretReference, policies []*conf_v1alpha1.Policy) error {
+func (lbc *LoadBalancerController) addEgressMTLSSecretRefs(secretRefs map[string]*secrets.SecretReference, policies []*conf_v1.Policy) error {
 	for _, pol := range policies {
 		if pol.Spec.EgressMTLS == nil {
 			continue
@@ -2245,12 +2444,12 @@ func (lbc *LoadBalancerController) addEgressMTLSSecretRefs(secretRefs map[string
 	return nil
 }
 
-func (lbc *LoadBalancerController) getPoliciesForSecret(secretNamespace string, secretName string) []*conf_v1alpha1.Policy {
+func (lbc *LoadBalancerController) getPoliciesForSecret(secretNamespace string, secretName string) []*conf_v1.Policy {
 	return findPoliciesForSecret(lbc.getAllPolicies(), secretNamespace, secretName)
 }
 
-func findPoliciesForSecret(policies []*conf_v1alpha1.Policy, secretNamespace string, secretName string) []*conf_v1alpha1.Policy {
-	var res []*conf_v1alpha1.Policy
+func findPoliciesForSecret(policies []*conf_v1.Policy, secretNamespace string, secretName string) []*conf_v1.Policy {
+	var res []*conf_v1.Policy
 
 	for _, pol := range policies {
 		if pol.Spec.IngressMTLS != nil && pol.Spec.IngressMTLS.ClientCertSecret == secretName && pol.Namespace == secretNamespace {
@@ -2680,64 +2879,22 @@ func (lbc *LoadBalancerController) syncAppProtectPolicy(task task) {
 		return
 	}
 
-	namespace, name, err := ParseNamespaceName(key)
-	if err != nil {
-		glog.Warningf("Policy key %v is invalid: %v", key, err)
-		return
-	}
-
-	resources := lbc.configuration.FindResourcesForAppProtectPolicy(namespace, name)
-
-	glog.V(2).Infof("Found %v resources with App Protect Policy %v", len(resources), key)
+	var changes []AppProtectChange
+	var problems []AppProtectProblem
 
 	if !polExists {
-		err = lbc.handleAppProtectPolicyDeletion(key, resources)
-		if err != nil {
-			glog.Errorf("Error deleting AppProtectPolicy %v: %v", key, err)
-		}
-		return
+		glog.V(2).Infof("Deleting AppProtectPolicy: %v\n", key)
+
+		changes, problems = lbc.appProtectConfiguration.DeletePolicy(key)
+	} else {
+		glog.V(2).Infof("Adding or Updating AppProtectPolicy: %v\n", key)
+
+		changes, problems = lbc.appProtectConfiguration.AddOrUpdatePolicy(obj.(*unstructured.Unstructured))
 	}
 
-	policy := obj.(*unstructured.Unstructured)
+	lbc.processAppProtectChanges(changes)
+	lbc.processAppProtectProblems(problems)
 
-	validationErr := ValidateAppProtectPolicy(policy)
-	if validationErr != nil {
-		err = lbc.handleAppProtectPolicyDeletion(key, resources)
-		if err != nil {
-			glog.Errorf("Error deleting AppProtectPolicy %v after it failed to validate: %v", key, err)
-		}
-		lbc.recorder.Eventf(policy, api_v1.EventTypeWarning, "Rejected", "%v was rejected: %v", key, validationErr)
-		return
-	}
-
-	err = lbc.handleAppProtectPolicyUpdate(policy, resources)
-	if err != nil {
-		lbc.recorder.Eventf(policy, api_v1.EventTypeWarning, "AddedOrUpdatedWithError", "App Protect Policy %v was added or updated with error: %v", key, err)
-		glog.Errorf("Error adding or updating AppProtectPolicy %v: %v", key, err)
-		return
-	}
-
-	lbc.recorder.Eventf(policy, api_v1.EventTypeNormal, "AddedOrUpdated", "AppProtectPolicy %v was added or updated", key)
-}
-
-func (lbc *LoadBalancerController) handleAppProtectPolicyUpdate(pol *unstructured.Unstructured, resources []Resource) error {
-	// VirtualServers don't support AppProtect policies
-	ingressExes, mergeableIngresses, _ := lbc.createExtendedResources(resources)
-
-	warnings, updateErr := lbc.configurator.AddOrUpdateAppProtectResource(pol, ingressExes, mergeableIngresses)
-	lbc.updateResourcesStatusAndEvents(resources, warnings, updateErr)
-
-	return updateErr
-}
-
-func (lbc *LoadBalancerController) handleAppProtectPolicyDeletion(key string, resources []Resource) error {
-	// VirtualServers don't support AppProtect policies
-	ingressExes, mergeableIngresses, _ := lbc.createExtendedResources(resources)
-
-	warnnigs, deleteErr := lbc.configurator.DeleteAppProtectPolicy(key, ingressExes, mergeableIngresses)
-	lbc.updateResourcesStatusAndEvents(resources, warnnigs, deleteErr)
-
-	return deleteErr
 }
 
 func (lbc *LoadBalancerController) syncAppProtectLogConf(task task) {
@@ -2749,65 +2906,48 @@ func (lbc *LoadBalancerController) syncAppProtectLogConf(task task) {
 		return
 	}
 
-	namespace, name, err := ParseNamespaceName(key)
-	if err != nil {
-		glog.Warningf("Log Configuration key %v is invalid: %v", key, err)
-		return
-	}
-
-	resources := lbc.configuration.FindResourcesForAppProtectLogConf(namespace, name)
-
-	glog.V(2).Infof("Found %v resources with App Protect LogConfig %v", len(resources), key)
+	var changes []AppProtectChange
+	var problems []AppProtectProblem
 
 	if !confExists {
-		glog.V(3).Infof("Deleting AppProtectLogConf %v", key)
-		err = lbc.appProtectLogConfDeletion(key, resources)
-		if err != nil {
-			glog.Errorf("Error deleting App Protect LogConfig %v: %v", key, err)
-		}
-		return
+		glog.V(2).Infof("Deleting AppProtectLogConf: %v\n", key)
+
+		changes, problems = lbc.appProtectConfiguration.DeleteLogConf(key)
+	} else {
+		glog.V(2).Infof("Adding or Updating AppProtectLogConf: %v\n", key)
+
+		changes, problems = lbc.appProtectConfiguration.AddOrUpdateLogConf(obj.(*unstructured.Unstructured))
 	}
 
-	logConf := obj.(*unstructured.Unstructured)
+	lbc.processAppProtectChanges(changes)
+	lbc.processAppProtectProblems(problems)
 
-	validationErr := ValidateAppProtectLogConf(logConf)
-	if validationErr != nil {
-		err = lbc.appProtectLogConfDeletion(key, resources)
-		if err != nil {
-			glog.Errorf("Error deleting App Protect LogConfig  %v after it failed to validate: %v", key, err)
-		}
-		lbc.recorder.Eventf(logConf, api_v1.EventTypeWarning, "Rejected", "%v was rejected: %v", key, validationErr)
-		return
-	}
+}
 
-	err = lbc.appProtectLogConfUpdate(logConf, resources)
+func (lbc *LoadBalancerController) syncAppProtectUserSig(task task) {
+	key := task.Key
+	glog.V(3).Infof("Syncing AppProtectUserSig %v", key)
+	obj, sigExists, err := lbc.appProtectUserSigLister.GetByKey(key)
 	if err != nil {
-		lbc.recorder.Eventf(logConf, api_v1.EventTypeWarning, "AddedOrUpdatedWithError", "App Protect Log Configuration %v was added or updated with error: %v", key, err)
-		glog.V(3).Infof("Error adding or updating AppProtectLogConf %v : %v", key, err)
+		lbc.syncQueue.Requeue(task, err)
 		return
 	}
 
-	lbc.recorder.Eventf(logConf, api_v1.EventTypeNormal, "AddedOrUpdated", "AppProtectLogConfig  %v was added or updated", key)
-}
+	var change AppProtectUserSigChange
+	var problems []AppProtectProblem
 
-func (lbc *LoadBalancerController) appProtectLogConfUpdate(logConf *unstructured.Unstructured, resources []Resource) error {
-	// VirtualServers don't support AppProtectLogConf
-	ingressExes, mergeableIngresses, _ := lbc.createExtendedResources(resources)
+	if !sigExists {
+		glog.V(2).Infof("Deleting AppProtectUserSig: %v\n", key)
 
-	warnings, updateErr := lbc.configurator.AddOrUpdateAppProtectResource(logConf, ingressExes, mergeableIngresses)
-	lbc.updateResourcesStatusAndEvents(resources, warnings, updateErr)
+		change, problems = lbc.appProtectConfiguration.DeleteUserSig(key)
+	} else {
+		glog.V(2).Infof("Adding or Updating AppProtectUserSig: %v\n", key)
 
-	return updateErr
-}
+		change, problems = lbc.appProtectConfiguration.AddOrUpdateUserSig(obj.(*unstructured.Unstructured))
+	}
 
-func (lbc *LoadBalancerController) appProtectLogConfDeletion(key string, resources []Resource) error {
-	// VirtualServers don't support AppProtectLogConf
-	ingressExes, mergeableIngresses, _ := lbc.createExtendedResources(resources)
-
-	warnings, deleteErr := lbc.configurator.DeleteAppProtectLogConf(key, ingressExes, mergeableIngresses)
-	lbc.updateResourcesStatusAndEvents(resources, warnings, deleteErr)
-
-	return deleteErr
+	lbc.processAppProtectUserSigChange(change)
+	lbc.processAppProtectProblems(problems)
 }
 
 // IsNginxReady returns ready status of NGINX
