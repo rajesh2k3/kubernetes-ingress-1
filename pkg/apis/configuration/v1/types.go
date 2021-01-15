@@ -324,7 +324,15 @@ type Policy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec PolicySpec `json:"spec"`
+	Spec   PolicySpec   `json:"spec"`
+	Status PolicyStatus `json:"status"`
+}
+
+//PolicyStatus is the status of the policy resource
+type PolicyStatus struct {
+	State   string `json:"state"`
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
 }
 
 // PolicySpec is the spec of the Policy resource.

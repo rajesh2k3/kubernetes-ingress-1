@@ -128,6 +128,16 @@ spec:
                       type: integer
                     zoneSize:
                       type: string
+            status:
+              description: PolicyStatus is the status of the policy resource
+              type: object
+              properties:
+                message:
+                  type: string
+                reason:
+                  type: string
+                state:
+                  type: string
       served: true
       storage: true
 status:
