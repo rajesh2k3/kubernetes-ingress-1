@@ -324,6 +324,7 @@ func NewLoadBalancerController(input NewLoadBalancerControllerInput) *LoadBalanc
 		ingressLister:            &lbc.ingressLister,
 		virtualServerLister:      lbc.virtualServerLister,
 		virtualServerRouteLister: lbc.virtualServerRouteLister,
+		policyLister:             lbc.policyLister,
 		keyFunc:                  keyFunc,
 		confClient:               input.ConfClient,
 	}
@@ -848,9 +849,21 @@ func (lbc *LoadBalancerController) syncPolicy(task task) {
 		pol := obj.(*conf_v1.Policy)
 		err := validation.ValidatePolicy(pol, lbc.isNginxPlus, lbc.enablePreviewPolicies)
 		if err != nil {
-			lbc.recorder.Eventf(pol, api_v1.EventTypeWarning, "Rejected", "Policy %v is invalid and was rejected: %v", key, err)
+			msg := fmt.Sprintf("Policy %v/%v is invalid and was rejected: %v", pol.Namespace, pol.Name, err)
+			lbc.recorder.Eventf(pol, api_v1.EventTypeWarning, "Rejected", msg)
+
+			err = lbc.statusUpdater.UpdatePolicyStatus(pol, "Invalid", "Rejected", msg)
+			if err != nil {
+				glog.V(3).Infof("Failed to update policy %s status: %v", key, err)
+			}
 		} else {
-			lbc.recorder.Eventf(pol, api_v1.EventTypeNormal, "AddedOrUpdated", "Policy %v was added or updated", key)
+			msg := fmt.Sprintf("Policy %v/%v was added or updated", pol.Namespace, pol.Name)
+			lbc.recorder.Eventf(pol, api_v1.EventTypeNormal, "AddedOrUpdated", msg)
+
+			err = lbc.statusUpdater.UpdatePolicyStatus(pol, "Valid", "AddedOrUpdated", msg)
+			if err != nil {
+				glog.V(3).Infof("Failed to update policy %s status: %v", key, err)
+			}
 		}
 	}
 
@@ -2344,7 +2357,12 @@ func (lbc *LoadBalancerController) getAllPolicies() []*conf_v1.Policy {
 
 		err := validation.ValidatePolicy(pol, lbc.isNginxPlus, lbc.enablePreviewPolicies)
 		if err != nil {
-			glog.V(3).Infof("Skipping invalid Policy %s/%s: %v", pol.Namespace, pol.Name, err)
+			msg := fmt.Sprintf("Skipping invalid Policy %s/%s: %v", pol.Namespace, pol.Name, err)
+			err = lbc.statusUpdater.UpdatePolicyStatus(pol, "Invalid", "Rejected", msg)
+			if err != nil {
+				glog.V(3).Infof("Failed to update policy %s status: %v", pol.Name, err)
+			}
+			glog.V(3).Infof(msg)
 			continue
 		}
 
@@ -2378,11 +2396,23 @@ func (lbc *LoadBalancerController) getPolicies(policies []conf_v1.PolicyReferenc
 		}
 
 		policy := policyObj.(*conf_v1.Policy)
-
+		msg := ""
 		err = validation.ValidatePolicy(policy, lbc.isNginxPlus, lbc.enablePreviewPolicies)
 		if err != nil {
-			errors = append(errors, fmt.Errorf("Policy %s is invalid: %v", policyKey, err))
+			msg = fmt.Sprintf("Policy %v/%s is invalid: %v", policy.Namespace, policy.Name, err)
+			err = lbc.statusUpdater.UpdatePolicyStatus(policy, "Invalid", "Rejected", msg)
+			if err != nil {
+				glog.V(3).Infof("Failed to update policy %s status: %v", policy.Name, err)
+			}
+
+			errors = append(errors, fmt.Errorf(msg))
 			continue
+		}
+
+		msg = fmt.Sprintf("Policy %v/%v was added or updated", policy.Namespace, policy.Name)
+		err = lbc.statusUpdater.UpdatePolicyStatus(policy, "Valid", "AcceptedOrUpdated", msg)
+		if err != nil {
+			glog.V(3).Infof("Failed to update policy %s status: %v", policy.Name, err)
 		}
 
 		result = append(result, policy)

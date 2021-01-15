@@ -23,6 +23,7 @@ import (
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
+
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -787,22 +788,29 @@ func TestGetPolicies(t *testing.T) {
 		Spec: conf_v1.PolicySpec{},
 	}
 
-	lbc := LoadBalancerController{
-		isNginxPlus: true,
-		policyLister: &cache.FakeCustomStore{
-			GetByKeyFunc: func(key string) (item interface{}, exists bool, err error) {
-				switch key {
-				case "default/valid-policy":
-					return validPolicy, true, nil
-				case "default/invalid-policy":
-					return invalidPolicy, true, nil
-				case "nginx-ingress/valid-policy":
-					return nil, false, nil
-				default:
-					return nil, false, errors.New("GetByKey error")
-				}
-			},
+	polLister := &cache.FakeCustomStore{
+		GetByKeyFunc: func(key string) (item interface{}, exists bool, err error) {
+			switch key {
+			case "default/valid-policy":
+				return validPolicy, true, nil
+			case "default/invalid-policy":
+				return invalidPolicy, true, nil
+			case "nginx-ingress/valid-policy":
+				return nil, false, nil
+			default:
+				return nil, false, errors.New("GetByKey error")
+			}
 		},
+	}
+
+	su := statusUpdater{
+		policyLister: polLister,
+	}
+
+	lbc := LoadBalancerController{
+		isNginxPlus:   true,
+		policyLister:  polLister,
+		statusUpdater: &su,
 	}
 
 	policyRefs := []conf_v1.PolicyReference{
