@@ -1,0 +1,108 @@
+name: TestRelease
+
+on:
+  push:
+    branches:
+      - test-rel-new-tar-name
+    paths-ignore:
+      - 'docs/**'
+      - 'docs-web/**'
+      - 'examples/**'
+      - 'examples-of-custom-resources/**'
+      - '**.md'
+  create:
+    tags:
+      - 'v[0-9].[0-9].[0-9]+*'
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DOCKER_BUILDKIT: 1
+  DOCKER_IMAGE: nginx/nginx-ingress
+  GOLANG_VERSION: 1.15
+  K8S_TIMEOUT: 75s
+  HELM_CHART_DIR: deployments/helm-chart
+  GIT_NAME: NGINX Kubernetes Team
+  GIT_MAIL: kubernetes@nginx.com
+
+jobs:
+
+  binary:
+    name: Build Binary
+    runs-on: ubuntu-18.04
+    outputs:
+      version: ${{ steps.commit.outputs.version }}
+      tags: ${{ steps.commit.outputs.tags }}
+      created: ${{ steps.commit.outputs.created }}
+      sha: ${{ steps.commit.outputs.sha }}
+      repo: ${{ steps.commit.outputs.repo }}
+      helmChartVersion: ${{ steps.commit.outputs.helmChartVersion }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+      - name: Output Variables
+        id: commit
+        run: |
+          SHA=${GITHUB_SHA::7}
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION="$(echo ${GITHUB_REF/refs\/tags\//} | tr -d v)"
+          else
+            VERSION="${SHA}"
+          fi
+          echo "::set-output name=version::${VERSION}"
+          echo "::set-output name=created::$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "::set-output name=sha::${SHA}"
+          echo "::set-output name=repo::${GITHUB_REPOSITORY#*/}"
+          echo "::set-output name=branch::${GITHUB_REF##*/}"
+          echo "::set-output name=helmChartVersion::$(helm show chart ${{ env.HELM_CHART_DIR }} | grep 'version:' | cut -d ' ' -f 2)"
+      - name: Build Binary
+        run: >
+          make binary
+          BUILD_IN_CONTAINER=0
+          VERSION=${{ steps.commit.outputs.version }}
+          IC_VERSION=${{ steps.commit.outputs.version }}
+          GIT_COMMIT=${{ steps.commit.outputs.sha }}
+        env:
+          GOFLAGS: '-mod=vendor -gcflags=-trimpath=${{ github.workspace }} -asmflags=-trimpath=${{ github.workspace }}'
+      - name: Store Artifacts in Cache
+        uses: actions/cache@v2
+        with:
+          path: ${{ github.workspace }}/nginx-ingress
+          key: nginx-ingress-${{ github.run_id }}-${{ github.run_number }}
+
+  release-plus-docker:
+    name: Release Plus Images
+    runs-on: ubuntu-18.04
+    needs: binary
+    steps:
+      - name: GCR Login
+        uses: docker/login-action@v1 
+        with:
+          registry: gcr.io
+          username: _json_key
+          password: ${{ secrets.GCR_JSON_KEY }}
+      - name: Pull from GCR and save
+        env:
+          UPLOADER_CERT: ${{ secrets.KIC_UPLOADER_CRT }}
+          UPLOADER_KEY: ${{ secrets.KIC_UPLOADER_KEY }}
+        run: |
+          docker pull gcr.io/f5-gcs-7899-ptg-ingrss-ctlr/nginx-ic/nginx-ingress-plus:29a599a
+          docker pull gcr.io/f5-gcs-7899-ptg-ingrss-ctlr/nginx-ic/nginx-ingress-plus:29a599a-opentracing
+          docker pull gcr.io/f5-gcs-7899-ptg-ingrss-ctlr/nginx-ic/nginx-ingress-plus:29a599a-ubi
+          docker pull gcr.io/f5-gcs-7899-ptg-ingrss-ctlr/nginx-ic-nap/nginx-ingress-plus-ap:29a599a
+          docker pull gcr.io/f5-gcs-7899-ptg-ingrss-ctlr/nginx-ic-nap/nginx-ingress-plus-ap:29a599a-ubi
+          echo "$UPLOADER_CERT" > kic-uploader.crt
+          echo "$UPLOADER_KEY" > kic-uploader.key
+          docker tag gcr.io/f5-gcs-7899-ptg-ingrss-ctlr/nginx-ic/nginx-ingress-plus:29a599a nginx-ic/nginx-plus-ingress:29a599a
+          docker tag gcr.io/f5-gcs-7899-ptg-ingrss-ctlr/nginx-ic/nginx-ingress-plus:29a599a-opentracing nginx-ic/nginx-plus-ingress:29a599a-opentracing
+          docker tag gcr.io/f5-gcs-7899-ptg-ingrss-ctlr/nginx-ic/nginx-ingress-plus:29a599a-ubi nginx-ic/nginx-plus-ingress:29a599a-ubi
+          docker tag gcr.io/f5-gcs-7899-ptg-ingrss-ctlr/nginx-ic-nap/nginx-ingress-plus-ap:29a599a nginx-ic-nap/nginx-plus-ingress-ap:29a599a
+          docker tag gcr.io/f5-gcs-7899-ptg-ingrss-ctlr/nginx-ic-nap/nginx-ingress-plus-ap:29a599a-ubi nginx-ic-nap/nginx-plus-ingress-ap:29a599a-ubi
+          docker save nginx-ic/nginx-plus-ingress:29a599a \
+                      nginx-ic/nginx-plus-ingress:29a599a-opentracing \
+                      nginx-ic/nginx-plus-ingress:29a599a-ubi \
+                      nginx-ic-nap/nginx-plus-ingress-ap:29a599a \
+                      nginx-ic-nap/nginx-plus-ingress-ap:29a599a-ubi | gzip > nginx-ic-test.tar.gz
+          curl -F "file=@nginx-ic.tar.gz" -F "file=@nginx-ic-nap.tar.gz" --cert kic-uploader.crt --key kic-uploader.key  https://up-ap.nginx.com/
